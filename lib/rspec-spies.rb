@@ -1,44 +1,90 @@
-require 'rspec/mocks/method_double'
-RSpec::Mocks::MethodDouble.class_eval do
-  # override defining stubs to record the message was called.
-  # there's only one line difference from upstream rspec, but can't change it without fully overriding
-  def define_proxy_method
-    method_name = @method_name
-    visibility_for_method = "#{visibility} :#{method_name}"
-    object_singleton_class.class_eval(<<-EOF, __FILE__, __LINE__)
-       def #{method_name}(*args, &block)
-         __mock_proxy.record_message_received :#{method_name}, *args, &block
-         __mock_proxy.message_received :#{method_name}, *args, &block
-       end
-    #{visibility_for_method}
-    EOF
+require 'rspec/mocks'
+
+class RSpec::Mocks::Proxy
+
+  attr_reader :messages_received, :error_generator
+
+  alias orig_message_received message_received
+
+  # This does the equivalent of the original MethodDouble monkey patch, but with
+  # less copying/work
+  def message_received(*args, &block)
+    orig_message_received(*args, &block).tap { record_message_received(*args, &block) }
+  end
+
+end
+
+module RSpec::Mocks::Methods
+
+  def messages_received
+    __mock_proxy.messages_received
+  end
+
+  def error_generator
+    __mock_proxy.error_generator
+  end
+
+  def replay_on(other, &match_block)
+    messages_received.each do |msg, args, &block|
+      if !match_block || match_block.call(msg,args,&block)
+        other.send msg, *args, &block
+      end
+    end
+  end
+
+end
+
+class RSpec::Mocks::MessageExpectation
+  public :error_generator=
+end
+
+module RSpec
+  module Spies
+    class Matcher
+
+      def initialize(message, expected_from)
+        @message, @mock = message, RSpec::Mocks::Mock.new
+        @mock.stub!(message)
+        @expectation = @mock.should_receive(message, :expected_from => expected_from)
+      end
+
+      def matches?(actual)
+        begin
+          @expectation.error_generator = actual.error_generator
+          actual.replay_on(@mock) {|msg,args,&block| @message == msg }
+          @mock.rspec_verify
+          true
+        rescue RSpec::Mocks::MockExpectationError => e
+          @exception = e
+          false
+        end
+      end
+
+      def failure_message_for_should
+        @exception.message
+      end
+
+      def failure_message_for_should_not
+        begin
+          @expectation.generate_error
+        rescue RSpec::Mocks::MockExpectationError => e
+          e.message.sub(/expected.*/m, "unexpected match")
+        end
+      end
+
+      def method_missing(meth, *args, &block)
+        @expectation.send meth, *args, &block
+        self
+      end
+
+    end
+
+    def have_received(message)
+      Matcher.new(message, caller(1)[0])
+    end
   end
 end
 
-require 'rspec/matchers'
-RSpec::Matchers.define :have_received do |sym, args, block|
-  match do |actual|
-    actual.received_message?(sym, *@args, &block)
-  end
-
-
-  failure_message_for_should do |actual|
-    "expected #{actual.inspect} to have received #{sym.inspect} with #{@args.inspect}"
-  end
-
-
-  failure_message_for_should_not do |actual|
-    "expected #{actual.inspect} to not have received #{sym.inspect} with #{@args.inspect}, but did"
-  end
-
-
-  description do
-    "to have received #{sym.inspect} with #{@args.inspect}"
-  end
-
-
-  def with(*args)
-    @args = args
-    self
-  end
+RSpec.configure do |config|
+  config.include RSpec::Spies
 end
