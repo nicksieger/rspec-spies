@@ -4,12 +4,16 @@ class RSpec::Mocks::Proxy
 
   attr_reader :messages_received, :error_generator
 
+  # This is the same as the original MethodDouble monkey patch, but with less copypasta
   alias orig_message_received message_received
-
-  # This does the equivalent of the original MethodDouble monkey patch, but with
-  # less copying/work
   def message_received(*args, &block)
     orig_message_received(*args, &block).tap { record_message_received(*args, &block) }
+  end
+
+  # Be sure to reset the messages received between specs!
+  alias orig_reset reset
+  def reset
+    orig_reset.tap { messages_received.clear }
   end
 
 end
